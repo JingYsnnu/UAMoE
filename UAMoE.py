@@ -32,15 +32,7 @@ def set_seed(seed=42):
         torch.backends.cudnn.benchmark = False
 
 
-# ============================================================================
-# 0. 不确定性评估指标
-# ============================================================================
-
 def compute_ece(preds, labels, n_bins=15):
-    """
-    Expected Calibration Error（标准定义）
-    acc = bin 内实际正例率（labels[mask].mean()），不是分类准确率
-    """
     preds = np.asarray(preds).flatten()
     labels = np.asarray(labels).flatten()
     bin_edges = np.linspace(0, 1, n_bins + 1)
@@ -60,7 +52,6 @@ def compute_ece(preds, labels, n_bins=15):
 
 
 def compute_aurc(preds, labels):
-    """Area Under Risk-Coverage Curve（越小越好）"""
     order = np.argsort(-np.abs(preds - 0.5))
     correct = ((preds[order] > 0.5).astype(int) == labels[order])
     risks = 1 - np.cumsum(correct) / np.arange(1, len(correct) + 1)
@@ -69,10 +60,6 @@ def compute_aurc(preds, labels):
 
 def compute_selective_accuracy(preds, labels, variances,
                                  coverages=(1.0, 0.8, 0.6, 0.4, 0.2)):
-    """
-    按方差升序保留最"确定"的前 coverage 比例样本，计算精度
-    返回 {coverage_str: accuracy}
-    """
     order = np.argsort(variances)
     n = len(order)
     out = {}
@@ -85,10 +72,6 @@ def compute_selective_accuracy(preds, labels, variances,
 
 
 def compute_spearman_both(vars_, preds, labels):
-    """
-    同时返回二值误差和连续误差下的 Spearman。
-    二值误差更稳定，连续误差信息量更大。
-    """
     err_bin = ((preds > 0.5).astype(int) != labels.astype(int)).astype(float)
     if len(np.unique(err_bin)) > 1:
         sp_bin, p_bin = spearmanr(vars_, err_bin)
@@ -104,12 +87,7 @@ def compute_spearman_both(vars_, preds, labels):
     return float(sp_bin), float(p_bin), float(sp_cont), float(p_cont)
 
 
-# ============================================================================
-# 1. 数据加载
-# ============================================================================
-
 class SimilarityDistribution:
-    """聚合多视图相似性，输出均值、标准差、置信度。"""
     def __init__(self, matrices):
         self.num_views = len(matrices)
         self.matrices = matrices
@@ -129,7 +107,7 @@ def load_data(data_path='data/'):
     CD = pd.read_csv(data_path + 'association.csv', header=None).values
     SC1 = pd.read_csv(data_path + 'gene sequence similarity.csv', header=None).values
     SC2 = pd.read_csv(data_path + 'expression_similarity_no_loop.csv', header=0,index_col=0).values
-    np.fill_diagonal(SC2, 1.0)   #加上自环
+    np.fill_diagonal(SC2, 1.0)
     SD1 = pd.read_csv(data_path + 'smiles similarity.csv', header=None).values
     SD2 = pd.read_csv(data_path + 'QED-based similarity.csv', header=None).values
 
@@ -166,15 +144,6 @@ def load_data(data_path='data/'):
 
 
 def compute_node_uncertainty_features(data):
-    """
-    每个节点 6 维不确定性特征：
-      0: 视图均值
-      1: 视图均值的标准差
-      2: 视图间绝对差均值
-      3: 视图1直方图熵
-      4: 视图2直方图熵
-      5: 视图间 Pearson 相关
-    """
     SC1, SC2 = data['circRNA']['SC1'], data['circRNA']['SC2']
     SD1, SD2 = data['drug']['SD1'], data['drug']['SD2']
     m, n = SC1.shape[0], SD1.shape[0]
@@ -212,20 +181,6 @@ def compute_node_uncertainty_features(data):
 
 
 def compute_edge_stats(c, d, unc_c, unc_d, data=None, CD=None, eps=1e-8):
-    """
-    6 维 pair-level 特征。
-    包含 node-level 聚合 + 真 pair-level 交互（邻居重叠、关联强度）。
-    
-    参数：
-      c, d: 节点索引
-      unc_c: (m, 6) circRNA node-level 特征
-      unc_d: (n, 6) drug node-level 特征
-      data: 数据字典（含相似性矩阵）
-      CD:   (m, n) 关联矩阵
-    """
-    # ============================================================
-    # Part 1: node-level 聚合（保留 3 维）
-    # ============================================================
     c_view_mean = unc_c[c, 0]
     d_view_mean = unc_d[d, 0]
     c_view_diff = unc_c[c, 2]
@@ -235,11 +190,7 @@ def compute_edge_stats(c, d, unc_c, unc_d, data=None, CD=None, eps=1e-8):
     unc_mean = (c_view_mean + d_view_mean) / 2
     view_diff_sum = c_view_diff + d_view_diff
 
-    # ============================================================
-    # Part 2: 真 pair-level 交互（3 维）
-    # ============================================================
     if data is None or CD is None:
-        # 兼容旧接口（不推荐）
         c_corr = unc_c[c, 5]
         d_corr = unc_d[d, 5]
         return [
@@ -251,32 +202,26 @@ def compute_edge_stats(c, d, unc_c, unc_d, data=None, CD=None, eps=1e-8):
             unc_diff / (unc_mean + eps),
         ]
 
-    # 2.1 c 的关联 drug 集合 与 d 的相似 drug 集合的重叠
-    SD_mean = data['drug']['mean']            # (n, n)
-    d_neighbors_drug = np.argsort(-SD_mean[d])[:10]   # d 最相似的 10 个 drug
-    c_assoc_drug = np.where(CD[c] > 0)[0]     # c 已知关联的 drug
+    SD_mean = data['drug']['mean']
+    d_neighbors_drug = np.argsort(-SD_mean[d])[:10]
+    c_assoc_drug = np.where(CD[c] > 0)[0]
     overlap = len(set(d_neighbors_drug) & set(c_assoc_drug))
     overlap_norm = overlap / 10.0
 
-    # 2.2 节点度数（归一化）
     c_degree = CD[c].sum()
     d_degree = CD[:, d].sum()
     c_degree_norm = c_degree / (CD.shape[1] + eps)
     d_degree_norm = d_degree / (CD.shape[0] + eps)
 
-    # 2.3 c 与 d 的关联强度（CD[c, d]，训练集里总是 0，但作为特征保留）
     cd_assoc = float(CD[c, d])
 
-    # ============================================================
-    # 组合 6 维
-    # ============================================================
     return [
-        unc_diff,          # 0: node-level 聚合（差）
-        unc_mean,          # 1: node-level 聚合（均）
-        view_diff_sum,     # 2: node-level 聚合（和）
-        overlap_norm,      # 3: ★ 真 pair-level（邻居重叠）
-        c_degree_norm,     # 4: ★ 真 pair-level（c 度数）
-        d_degree_norm,     # 5: ★ 真 pair-level（d 度数）
+        unc_diff,
+        unc_mean,
+        view_diff_sum,
+        overlap_norm,
+        c_degree_norm,
+        d_degree_norm,
     ]
 
 
@@ -366,10 +311,8 @@ def prepare_all_samples(data, random_seed=42, neg_ratio=1,
         for c, d in all_pairs
     ])
 
-    # ★ 计算节点级不确定性特征
     circ_unc_c, drug_unc_d = compute_node_uncertainty_features(data)
 
-    # ★ 新 dist_stats：真"边级"特征（两个节点联合定义）
     dist_stats = np.array([
         compute_edge_stats(c, d, circ_unc_c, drug_unc_d, data, CD)
         for c, d in all_pairs
@@ -387,17 +330,10 @@ def prepare_all_samples(data, random_seed=42, neg_ratio=1,
     }
 
 
-# ============================================================================
-# 2. 不确定性感知的图构建
-# ============================================================================
-
 def build_uncertainty_aware_adjacency(sim_mean, sim_std, top_k=10,
                                         sim_threshold=0.5,
                                         uncertainty_threshold=0.5,
                                         verbose=False):
-    """
-    先 Top-K 再过滤。
-    """
     n = sim_mean.shape[0]
     adj = np.zeros_like(sim_mean)
 
@@ -446,10 +382,10 @@ def build_uncertainty_aware_adjacency(sim_mean, sim_std, top_k=10,
 
     if verbose:
         print(f"    [Adj Build] sim_th={sim_threshold}, unc_th={uncertainty_threshold}, top_k={top_k}")
-        print(f"    [Adj Build] 通过 sim 阈值: {total_sim_pass}")
-        print(f"    [Adj Build] Top-K 后: {total_after_topk}")
-        print(f"    [Adj Build] 最终: {total_final}")
-        print(f"    [Adj Build] 过滤率: {1 - total_final / max(total_after_topk, 1):.4f}")
+        print(f"    [Adj Build] Passed sim threshold: {total_sim_pass}")
+        print(f"    [Adj Build] After Top-K: {total_after_topk}")
+        print(f"    [Adj Build] Final: {total_final}")
+        print(f"    [Adj Build] Filter rate: {1 - total_final / max(total_after_topk, 1):.4f}")
 
     return adj
 
@@ -514,10 +450,6 @@ def build_adjacency_matrices(data, sim_threshold=0.5, uncertainty_threshold=0.5,
     }
 
 
-# ============================================================================
-# 3. 模型定义
-# ============================================================================
-
 class GraphEncoder(nn.Module):
     def __init__(self, num_circRNA, num_drug, hidden_dim=128, num_layers=2, dropout=0.2):
         super().__init__()
@@ -568,10 +500,6 @@ class GraphEncoder(nn.Module):
 
 
 class UncertaintyAwareMoEPredictor(nn.Module):
-    """
-    不确定性感知的混合专家预测器。
-    每个专家输出 [logit, log_var]，最终方差 = 专家内方差 + 专家间分歧。
-    """
     def __init__(self, num_circRNA, num_drug, hidden_dim=128, num_experts=4,
                  top_k=2, dropout=0.2, num_gnn_layers=2):
         super().__init__()
@@ -632,7 +560,6 @@ class UncertaintyAwareMoEPredictor(nn.Module):
             nn.Softmax(dim=-1)
         )
 
-        # ★ uncertainty_modulator 输入从 2 改成 6（用完整 dist_stats）
         self.uncertainty_modulator = nn.Sequential(
             nn.Linear(6, 16),
             nn.ReLU(),
@@ -651,7 +578,7 @@ class UncertaintyAwareMoEPredictor(nn.Module):
     
         combined = self.fusion(torch.cat([
             c_graph_emb, d_graph_emb, unc_features
-        ], dim=-1))          # shape: [B, hidden_dim]
+        ], dim=-1))          
     
         expert_input = torch.cat([combined, dist_encoded], dim=-1)
     
@@ -691,10 +618,8 @@ class UncertaintyAwareMoEPredictor(nn.Module):
             return pred, final_var, gate_weights, combined
         return pred, final_var, gate_weights
 
+
 class FocalGaussianNLL(nn.Module):
-    """
-    Focal 加权的 Gaussian NLL
-    """
     def __init__(self, alpha=0.75, gamma=2.0):
         super().__init__()
         self.alpha = alpha
@@ -705,28 +630,22 @@ class FocalGaussianNLL(nn.Module):
         pred_mu = torch.clamp(pred_mu, eps, 1 - eps)
         pred_var = torch.clamp(pred_var, min=1e-4, max=1.0)
 
-        # Gaussian NLL
         nll = (labels - pred_mu) ** 2 / (2 * pred_var) + 0.5 * torch.log(pred_var)
 
-        # Focal 权重
         pt = torch.where(labels == 1, pred_mu, 1 - pred_mu)
         focal_weight = (1 - pt) ** self.gamma
         alpha_weight = torch.where(labels == 1, self.alpha, 1 - self.alpha)
 
         loss = alpha_weight * focal_weight * nll
 
-        # 外部置信度加权
         if confidences is not None:
             conf = confidences.detach().clamp(min=0.1, max=1.0)
             loss = loss * conf
 
         return loss.mean()
 
-# ============================================================================
-# 4. 训练与评估
-# ============================================================================
+
 def extract_features(model, loader, adj_SC, adj_SD, adj_CD, device='cpu'):
-    """提取整个 loader 的 fusion 特征、预测值、方差、标签"""
     model.eval()
     feats, preds, vars_, labels = [], [], [], []
     with torch.no_grad():
@@ -751,6 +670,8 @@ def extract_features(model, loader, adj_SC, adj_SD, adj_CD, device='cpu'):
             np.concatenate(preds, 0),
             np.concatenate(vars_, 0),
             np.concatenate(labels, 0))
+
+
 def evaluate(model, loader, adj_SC, adj_SD, adj_CD, device='cpu'):
     model.eval()
     all_preds, all_labels, all_vars = [], [], []
@@ -787,15 +708,12 @@ def evaluate(model, loader, adj_SC, adj_SD, adj_CD, device='cpu'):
     sensitivity = recall
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
 
-    # ★ Spearman：二值和连续两种
     sp_bin, p_bin, sp_cont, p_cont = compute_spearman_both(all_vars, all_preds, all_labels)
 
-    # ★ ECE / AURC / SelAcc
     ece = compute_ece(all_preds, all_labels)
     aurc = compute_aurc(all_preds, all_labels)
     sel_acc = compute_selective_accuracy(all_preds, all_labels, all_vars)
 
-    # ★ Brier / NLL
     brier = float(np.mean((all_preds - all_labels) ** 2))
     nll = float(np.mean(-(all_labels * np.log(all_preds + 1e-8) +
                            (1 - all_labels) * np.log(1 - all_preds + 1e-8))))
@@ -873,16 +791,11 @@ def create_dataloader_from_indices(samples, indices, batch_size=256, shuffle=Tru
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                       num_workers=0, drop_last=False)
 
+
 def fit_temperature(model, val_loader, adj_SC, adj_SD, adj_CD,
                      device='cpu', T_range=(0.5, 3.0), n_grid=200):
-    """
-    在验证集上网格搜索温度 T。
-    目标 = 0.5 * ECE + 0.5 * Brier（避免纯 ECE 的退化解）。
-    返回 (T, score)。
-    """
     model.eval()
 
-    # 收集验证集的 logit 和 label
     all_logits, all_labels = [], []
     with torch.no_grad():
         for batch in val_loader:
@@ -916,11 +829,11 @@ def fit_temperature(model, val_loader, adj_SC, adj_SD, adj_CD,
 
     return float(best_T), float(best_score)
 
+
 def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
                        fold_seed=42, device='cpu'):
     set_seed(fold_seed)
 
-    # ---------- 1. 构建图 ----------
     adj_matrices = build_adjacency_matrices(
         data,
         sim_threshold=config.get('adj_threshold', 0.5),
@@ -931,7 +844,6 @@ def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
     adj_SD = adj_matrices['SD_norm'].to(device)
     adj_CD = adj_matrices['CD_norm'].to(device)
 
-    # ---------- 2. DataLoader ----------
     train_loader = create_dataloader_from_indices(
         samples, train_idx, batch_size=config['batch_size'], shuffle=True)
     val_loader = create_dataloader_from_indices(
@@ -939,7 +851,6 @@ def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
     test_loader = create_dataloader_from_indices(
         samples, test_idx, batch_size=config['batch_size'], shuffle=False)
 
-    # ---------- 3. 模型 ----------
     model = UncertaintyAwareMoEPredictor(
         num_circRNA=samples['num_circRNA'],
         num_drug=samples['num_drug'],
@@ -964,16 +875,14 @@ def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
         gamma=config.get('focal_gamma', 2.0)
     )
 
-    # ---------- 4. 训练 + 早停 ----------
     best_val_auc = 0
     best_state = None
     patience_counter = 0
     history = {'train_loss': [], 'val_auc': [], 'val_aupr': [],
                'val_acc': [], 'val_spearman': [], 'val_ece': []}
 
-    # ★ 新增：记录指定 epoch 的特征，用于 t-SNE 可视化
-    tsne_cache = {}              # {epoch: (feats, preds, vars, labels)}
-    target_epochs = {1, 5, 15}   # 想观察的 epoch
+    tsne_cache = {}              
+    target_epochs = {1, 5, 15}   
 
     for epoch in range(1, config['num_epochs'] + 1):
         train_loss = train_epoch(model, train_loader, optimizer, criterion,
@@ -990,7 +899,6 @@ def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
 
         scheduler.step()
 
-        # ★ 捕获指定 epoch 的特征（在验证集上，更能反映泛化能力）
         if epoch in target_epochs:
             feats, preds_, vars_, labels_ = extract_features(
                 model, val_loader, adj_SC, adj_SD, adj_CD, device)
@@ -1004,7 +912,6 @@ def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
             patience_counter += 1
             if patience_counter >= config['patience']:
                 print(f"    Early stopping at epoch {epoch}")
-                # ★ 捕获早停那一轮的特征
                 feats, preds_, vars_, labels_ = extract_features(
                     model, val_loader, adj_SC, adj_SD, adj_CD, device)
                 tsne_cache[epoch] = (feats, preds_, vars_, labels_)
@@ -1016,29 +923,22 @@ def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
                       f"Val Spearman: {val_metrics['spearman']:.4f} | "
                       f"Val ECE: {val_metrics['ece']:.4f}")
 
-    # ---------- 5. 加载最佳权重 ----------
     if best_state is not None:
         model.load_state_dict({k: v.to(device) for k, v in best_state.items()})
 
-    # ============================================================
-    # ★ 6. 温度缩放：在验证集上拟合 T
-    # ============================================================
     temperature, val_cal_score = fit_temperature(
         model, val_loader, adj_SC, adj_SD, adj_CD, device,
         T_range=(0.1, 3.0), n_grid=300)
     print(f"    [Calibration] optimal T = {temperature:.4f} "
           f"(val score = {val_cal_score:.4f})")
 
-    # ---------- 7. 未校准评估（对照） ----------
     test_metrics_raw = evaluate(model, test_loader,
                                  adj_SC, adj_SD, adj_CD, device)
 
-    # ---------- 8. 校准后评估（主结果） ----------
     test_metrics = evaluate_with_temperature(
         model, test_loader, adj_SC, adj_SD, adj_CD,
         temperature=temperature, device=device)
 
-    # ---------- 9. 把原始指标和 T 都塞进返回 dict ----------
     test_metrics['temperature'] = float(temperature)
     test_metrics['ece_raw'] = test_metrics_raw['ece']
     test_metrics['aurc_raw'] = test_metrics_raw['aurc']
@@ -1049,7 +949,6 @@ def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
     test_metrics['spearman_cont_raw'] = test_metrics_raw['spearman_cont']
     test_metrics['sel_acc_raw'] = test_metrics_raw['sel_acc']
 
-    # Debug 打印
     print(f"    [Debug] raw:  AUC={test_metrics_raw['auc']:.4f} | "
           f"ECE={test_metrics_raw['ece']:.4f} | "
           f"Spearman={test_metrics_raw['spearman']:.4f}")
@@ -1057,15 +956,11 @@ def train_single_fold(samples, train_idx, val_idx, test_idx, data, config,
           f"ECE={test_metrics['ece']:.4f} | "
           f"Spearman={test_metrics['spearman']:.4f} | T={temperature:.3f}")
 
-    # ★ 返回 5 个值，与 cross_validation 中的解包一致
     return model, test_metrics, history, best_val_auc, tsne_cache
+
 
 def evaluate_with_temperature(model, loader, adj_SC, adj_SD, adj_CD,
                                 temperature=1.0, device='cpu'):
-    """
-    应用温度缩放后的评估。
-    返回与 evaluate() 相同的指标结构。
-    """
     model.eval()
     all_preds, all_labels, all_vars = [], [], []
 
@@ -1081,7 +976,6 @@ def evaluate_with_temperature(model, loader, adj_SC, adj_SD, adj_CD,
             pred_mu, pred_var, _ = model(c_idx, d_idx, unc_c, unc_d,
                                           dist_stats, adj_SC, adj_SD, adj_CD)
 
-            # 温度缩放
             pred_mu = torch.clamp(pred_mu, 1e-6, 1 - 1e-6)
             logit = torch.log(pred_mu / (1 - pred_mu))
             calibrated = torch.sigmoid(logit / temperature)
@@ -1105,10 +999,8 @@ def evaluate_with_temperature(model, loader, adj_SC, adj_SD, adj_CD,
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
 
-    # Spearman（二值和连续）
     sp_bin, p_bin, sp_cont, p_cont = compute_spearman_both(all_vars, all_preds, all_labels)
 
-    # 校准与选择性预测指标
     ece = compute_ece(all_preds, all_labels)
     aurc = compute_aurc(all_preds, all_labels)
     sel_acc = compute_selective_accuracy(all_preds, all_labels, all_vars)
@@ -1127,6 +1019,7 @@ def evaluate_with_temperature(model, loader, adj_SC, adj_SD, adj_CD,
         'variances': all_vars,
         'labels': all_labels,
     }
+
 
 def cross_validation(samples, data, config, n_folds=5, device='cpu'):
     print(f"\n{'='*60}")
@@ -1165,7 +1058,6 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
 
         print(f"  Train: {len(train_idx)}, Val: {len(val_idx)}, Test: {len(test_idx)}")
 
-        # ---------- 训练单折（内部已包含温度缩放） ----------
         model, test_metrics, history, best_val_auc, tsne_cache = train_single_fold(
             samples, train_idx, val_idx, test_idx, data, config,
             fold_seed=42+fold, device=device
@@ -1183,7 +1075,6 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
         all_test_circrna_idx.extend(test_pairs[:, 0].tolist())
         all_test_drug_idx.extend(test_pairs[:, 1].tolist())
 
-        # ---------- 每折输出 ----------
         print(f"\n  Fold {fold+1} Test Results:")
         print(f"    AUC:         {test_metrics['auc']:.4f}")
         print(f"    AUPR:        {test_metrics['aupr']:.4f}")
@@ -1201,14 +1092,10 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
         print(f"    SelAcc@20%:  {test_metrics['sel_acc'].get('0.2', 0):.4f}")
         print(f"    T:           {test_metrics['temperature']:.4f}")
 
-    # ============================================================
-    # 汇总（含校准前后）
-    # ============================================================
     print(f"\n{'='*60}")
     print(f"Cross Validation Summary ({n_folds} folds)")
     print(f"{'='*60}")
 
-    # 需要汇总的指标
     metrics_to_report = [
         'auc', 'aupr', 'acc', 'f1', 'precision', 'recall', 'specificity',
         'spearman', 'spearman_cont',
@@ -1231,25 +1118,19 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
         }
         print(f"  {metric.upper():16s}: {np.mean(values):.4f} ± {np.std(values):.4f}")
 
-    # SelAcc 各覆盖率汇总
     for cov in ['1.0', '0.8', '0.6', '0.4', '0.2']:
         vals = [r['sel_acc'].get(cov, 0) for r in fold_results]
         summary[f'sel_acc_{cov}'] = {'mean': np.mean(vals), 'std': np.std(vals)}
         print(f"  SelAcc@{cov:>4s}     : {np.mean(vals):.4f} ± {np.std(vals):.4f}")
 
-    # 平均 T
     print(f"  {'MEAN_T':16s}: {np.mean(all_temperatures):.4f} ± "
           f"{np.std(all_temperatures):.4f}")
 
-    # ============================================================
-    # 合并所有折（总体指标）
-    # ============================================================
     all_test_preds = np.array(all_test_preds)
     all_test_labels = np.array(all_test_labels)
     all_test_vars = np.array(all_test_vars)
     all_test_binary = (all_test_preds > 0.5).astype(int)
 
-    # 二分类指标
     overall_auc = roc_auc_score(all_test_labels, all_test_preds)
     overall_aupr = average_precision_score(all_test_labels, all_test_preds)
     overall_acc = accuracy_score(all_test_labels, all_test_binary)
@@ -1262,12 +1143,10 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
     overall_sensitivity = overall_recall
     overall_specificity = tn_all / (tn_all + fp_all) if (tn_all + fp_all) > 0 else 0
 
-    # Spearman（二值 + 连续）
     overall_spearman, overall_spearman_pval, \
         overall_spearman_cont, overall_spearman_cont_pval = compute_spearman_both(
         all_test_vars, all_test_preds, all_test_labels)
 
-    # 校准与选择性预测
     overall_ece = compute_ece(all_test_preds, all_test_labels)
     overall_aurc = compute_aurc(all_test_preds, all_test_labels)
     overall_sel_acc = compute_selective_accuracy(
@@ -1278,17 +1157,11 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
         -(all_test_labels * np.log(all_test_preds + 1e-8) +
           (1 - all_test_labels) * np.log(1 - all_test_preds + 1e-8))))
 
-    # 原始（未校准）的指标也要汇总 —— 从 fold_results 里加权平均
-    # 这里用"合并所有折的原始预测"重新计算更严谨
-    # 简单起见，用 fold 级别平均
     overall_ece_raw = np.mean([r['ece_raw'] for r in fold_results])
     overall_aurc_raw = np.mean([r['aurc_raw'] for r in fold_results])
     overall_brier_raw = np.mean([r['brier_raw'] for r in fold_results])
     overall_nll_raw = np.mean([r['nll_raw'] for r in fold_results])
 
-    # ============================================================
-    # 整体输出
-    # ============================================================
     print(f"\n  Overall (all folds combined, calibrated):")
     print(f"    AUC:         {overall_auc:.4f}")
     print(f"    AUPR:        {overall_aupr:.4f}")
@@ -1315,9 +1188,6 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
     print(f"    Brier:       {overall_brier_raw:.4f}")
     print(f"    NLL:         {overall_nll_raw:.4f}")
 
-    # ============================================================
-    # 返回
-    # ============================================================
     return {
         'fold_results': fold_results,
         'fold_models': fold_models,
@@ -1331,7 +1201,6 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
         'all_temperatures': all_temperatures,
         'fold_tsne_caches': fold_tsne_caches,
 
-        # ===== 校准后（主结果） =====
         'overall_auc': overall_auc,
         'overall_aupr': overall_aupr,
         'overall_acc': overall_acc,
@@ -1350,26 +1219,20 @@ def cross_validation(samples, data, config, n_folds=5, device='cpu'):
         'overall_brier': overall_brier,
         'overall_nll': overall_nll,
 
-        # ===== 原始（对照） =====
         'overall_ece_raw': overall_ece_raw,
         'overall_aurc_raw': overall_aurc_raw,
         'overall_brier_raw': overall_brier_raw,
         'overall_nll_raw': overall_nll_raw,
     }
-# ============================================================================
-# 5. 可视化
-# ============================================================================
+
+
 from sklearn.manifold import TSNE
+
 def build_overall_tsne_cache(cv_results):
-    """
-    从每折的 t-SNE 缓存拼接出 overall 缓存。
-    返回：{epoch: (feats, preds, vars, labels)}
-    """
     fold_caches = cv_results.get('fold_tsne_caches', [])
     if not fold_caches:
         return None
 
-    # 收集所有 epoch
     all_epochs = set()
     for cache in fold_caches:
         if cache:
@@ -1400,12 +1263,8 @@ def build_overall_tsne_cache(cv_results):
 
     return overall_cache
 
+
 def plot_tsne_per_fold(cv_results, save_dir):
-    """
-    对每一折的指定 epoch（1, 5, 15, 早停轮）做 t-SNE 可视化。
-    按 true label 着色。
-    ★ 修改：2×2 排布
-    """
     fold_caches = cv_results.get('fold_tsne_caches', [])
     if not fold_caches:
         print("[t-SNE] No cached features found.")
@@ -1418,7 +1277,6 @@ def plot_tsne_per_fold(cv_results, save_dir):
         epochs = sorted(cache.keys())
         n_panels = len(epochs)
 
-        # ★ 固定 2×2 排布
         if n_panels > 4:
             print(f"[t-SNE] Fold {fold_idx+1}: {n_panels} epochs > 4, "
                   f"only showing first 4.")
@@ -1426,12 +1284,11 @@ def plot_tsne_per_fold(cv_results, save_dir):
             n_panels = 4
 
         fig, axes = plt.subplots(2, 2, figsize=(11, 10))
-        axes = axes.flatten()   # 展平为长度 4 的数组
+        axes = axes.flatten()   
 
         for i in range(4):
             ax = axes[i]
 
-            # ★ 多余的子图隐藏
             if i >= n_panels:
                 ax.axis('off')
                 continue
@@ -1439,7 +1296,6 @@ def plot_tsne_per_fold(cv_results, save_dir):
             ep = epochs[i]
             feats, preds_, vars_, labels_ = cache[ep]
 
-            # 子采样，避免 t-SNE 太慢
             n = len(feats)
             if n > 3000:
                 idx = np.random.RandomState(0).choice(n, 3000, replace=False)
@@ -1469,8 +1325,8 @@ def plot_tsne_per_fold(cv_results, save_dir):
         plt.close()
         print(f"[t-SNE] Saved {save_path}")
         
+
 def plot_cv_results(cv_results, save_dir):
-    # 图1：6 个基础指标
     fig, axes = plt.subplots(2, 3, figsize=(16, 10))
     metrics = ['auc', 'aupr', 'acc', 'f1', 'spearman', 'ece']
     titles = ['AUC', 'AUPR', 'Accuracy', 'F1', 'Spearman', 'ECE']
@@ -1493,7 +1349,6 @@ def plot_cv_results(cv_results, save_dir):
     plt.savefig(os.path.join(save_dir, 'cv_results.png'), dpi=150)
     plt.close()
 
-    # 图2：训练曲线
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     for fold, hist in enumerate(cv_results['fold_histories']):
         axes[0].plot(hist['val_auc'], label=f'Fold {fold+1}', alpha=0.7)
@@ -1509,11 +1364,8 @@ def plot_cv_results(cv_results, save_dir):
     plt.savefig(os.path.join(save_dir, 'cv_training_curves.png'), dpi=150)
     plt.close()
 
-    # 图3：ROC / PR
-    # ============================================================
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 
-    # ---- 计算 5 折 AUC / AUPR 的 mean ± std ----
     fold_aucs = [r['auc'] for r in cv_results['fold_results']]
     fold_auprs = [r['aupr'] for r in cv_results['fold_results']]
     auc_mean = np.mean(fold_aucs)
@@ -1521,13 +1373,10 @@ def plot_cv_results(cv_results, save_dir):
     aupr_mean = np.mean(fold_auprs)
     aupr_std = np.std(fold_auprs)
 
-    # ---- 左图：ROC ----
-    # 5 折曲线（不标标签）
     for fold, result in enumerate(cv_results['fold_results']):
         fpr, tpr, _ = roc_curve(result['labels'], result['predictions'])
         axes[0].plot(fpr, tpr, alpha=0.35, linewidth=1.2, color='steelblue')
 
-    # Overall 曲线（黑色粗线，代表"综合"）
     fpr_all, tpr_all, _ = roc_curve(cv_results['all_test_labels'],
                                       cv_results['all_test_preds'])
     axes[0].plot(fpr_all, tpr_all, 'k-', linewidth=2.5,
@@ -1540,14 +1389,11 @@ def plot_cv_results(cv_results, save_dir):
     axes[0].legend(loc='lower right', fontsize=11, framealpha=0.95)
     axes[0].grid(True, alpha=0.3)
 
-    # ---- 右图：PR ----
-    # 5 折曲线（不标标签）
     for fold, result in enumerate(cv_results['fold_results']):
         precision, recall, _ = precision_recall_curve(result['labels'],
                                                         result['predictions'])
         axes[1].plot(recall, precision, alpha=0.35, linewidth=1.2, color='steelblue')
 
-    # Overall 曲线
     precision_all, recall_all, _ = precision_recall_curve(
         cv_results['all_test_labels'], cv_results['all_test_preds'])
     axes[1].plot(recall_all, precision_all, 'k-', linewidth=2.5,
@@ -1562,6 +1408,7 @@ def plot_cv_results(cv_results, save_dir):
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'cv_roc_pr.png'), dpi=150)
     plt.close()
+    
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     for fold, result in enumerate(cv_results['fold_results']):
         fpr, tpr, _ = roc_curve(result['labels'], result['predictions'])
@@ -1590,7 +1437,6 @@ def plot_cv_results(cv_results, save_dir):
     plt.savefig(os.path.join(save_dir, 'cv_roc_pr.png'), dpi=150)
     plt.close()
 
-    # 图4：预测分布 + 方差-预测散点
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     axes[0].hist(cv_results['all_test_preds'][cv_results['all_test_labels']==0],
                  bins=30, alpha=0.5, label='Negative', color='red', density=True)
@@ -1617,7 +1463,6 @@ def plot_cv_results(cv_results, save_dir):
 
 
 def plot_uncertainty_binning(cv_results, save_dir):
-    """不确定性分箱分析"""
     preds = cv_results['all_test_preds']
     vars_ = cv_results['all_test_vars']
     labels = cv_results['all_test_labels']
@@ -1657,7 +1502,6 @@ def plot_uncertainty_binning(cv_results, save_dir):
                      f'{acc:.4f}\n(n={size})',
                      ha='center', va='bottom', fontsize=9)
 
-    # 选择性预测
     sorted_idx = np.argsort(vars_)
     sorted_preds = preds[sorted_idx]
     sorted_labels = labels[sorted_idx]
@@ -1706,14 +1550,12 @@ def plot_uncertainty_binning(cv_results, save_dir):
 
 
 def plot_ece_reliability(cv_results, save_dir):
-    """可靠性图 + 分组 ECE"""
     preds = cv_results['all_test_preds']
     labels = cv_results['all_test_labels']
     vars_ = cv_results['all_test_vars']
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
 
-    # 可靠性图
     n_bins = 15
     bin_edges = np.linspace(0, 1, n_bins + 1)
     bin_centers, bin_accs, bin_confs, bin_sizes = [], [], [], []
@@ -1739,7 +1581,6 @@ def plot_ece_reliability(cv_results, save_dir):
     axes[0].legend(); axes[0].grid(True, alpha=0.3)
     axes[0].set_xlim([0, 1]); axes[0].set_ylim([0, 1])
 
-    # 分组 ECE
     n_groups = 5
     group_edges = np.percentile(vars_, np.linspace(0, 100, n_groups + 1))
     group_edges[-1] += 1e-6
@@ -1770,7 +1611,6 @@ def plot_ece_reliability(cv_results, save_dir):
 
 
 def plot_risk_coverage(cv_results, save_dir):
-    """Risk-Coverage 曲线 + 三线对照"""
     preds = cv_results['all_test_preds']
     labels = cv_results['all_test_labels']
     vars_ = cv_results['all_test_vars']
@@ -1779,7 +1619,6 @@ def plot_risk_coverage(cv_results, save_dir):
 
     coverages = np.linspace(0.05, 1.0, 50)
 
-    # 左图：三种置信度
     for name, scores in [('Variance (ours)', -vars_),
                           ('|p-0.5| (baseline)', np.abs(preds - 0.5)),
                           ('Random', np.random.RandomState(0).randn(len(preds)))]:
@@ -1799,7 +1638,6 @@ def plot_risk_coverage(cv_results, save_dir):
     axes[0].legend(); axes[0].grid(True, alpha=0.3)
     axes[0].invert_xaxis()
 
-    # 右图：选择性预测精度
     for name, scores in [('Variance (ours)', -vars_),
                           ('|p-0.5| (baseline)', np.abs(preds - 0.5)),
                           ('Random', np.random.RandomState(0).randn(len(preds)))]:
@@ -1821,10 +1659,6 @@ def plot_risk_coverage(cv_results, save_dir):
     plt.savefig(os.path.join(save_dir, 'risk_coverage.png'), dpi=150)
     plt.close()
 
-
-# ============================================================================
-# 6. 主程序
-# ============================================================================
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -1851,7 +1685,7 @@ def main():
         'num_hard_negatives': 3000,
         'focal_alpha': 0.75,
         'focal_gamma': 2.0,
-        'adj_threshold': 0,  #可能和top_k的取值冲突，设置为0，不使用相似性的值过滤
+        'adj_threshold': 0, 
         'uncertainty_threshold': 0.6,
         'top_k_neighbors': 15,
         'data_path': 'data/',
@@ -1887,7 +1721,6 @@ def main():
 
     pd.DataFrame([config]).to_csv(os.path.join(save_dir, 'config.csv'), index=False)
 
-    # 每折汇总
     summary_data = []
     for fold, result in enumerate(cv_results['fold_results']):
         row = {'fold': fold + 1}
@@ -1901,7 +1734,6 @@ def main():
         summary_data.append(row)
     pd.DataFrame(summary_data).to_csv(os.path.join(save_dir, 'fold_results.csv'), index=False)
 
-    # 指标 mean/std/min/max
     summary_stats = []
     for metric in ['auc', 'aupr', 'acc', 'f1', 'spearman', 'spearman_cont',
                    'ece', 'aurc', 'brier', 'nll']:
@@ -1913,16 +1745,13 @@ def main():
         })
     pd.DataFrame(summary_stats).to_csv(os.path.join(save_dir, 'summary.csv'), index=False)
 
-    # 每折训练历史
     for fold, hist in enumerate(cv_results['fold_histories']):
         pd.DataFrame(hist).to_csv(os.path.join(save_dir, f'history_fold_{fold+1}.csv'),
                                    index=False)
 
-    # 每折模型权重
     for fold, model in enumerate(cv_results['fold_models']):
         torch.save(model.state_dict(), os.path.join(save_dir, f'model_fold_{fold+1}.pt'))
 
-    # 保存测试预测
     test_df = pd.DataFrame({
         'circRNA_index': cv_results['all_test_circrna_idx'],
         'drug_index':    cv_results['all_test_drug_idx'],
@@ -1955,7 +1784,6 @@ def main():
     print(f"  SelAcc@20%: {cv_results['overall_sel_acc'].get('0.2', 0):.4f}")
 
     return cv_results
-
 
 
 if __name__ == '__main__':
